@@ -502,6 +502,23 @@ class GHLMCPHttpServer {
     this.app.get('/sse', handleSSE);
     this.app.post('/sse', handleSSE);
 
+    // n8n compatibility: expose GET /mcp for protocol probe and SSE on same path
+    this.app.get('/mcp', async (req: express.Request, res: express.Response) => {
+      // If client requests SSE, upgrade to event stream
+      const accept = (req.headers['accept'] || '').toString().toLowerCase();
+      if (accept.includes('text/event-stream')) {
+        return handleSSE(req, res);
+      }
+
+      // Otherwise respond with minimal protocol info
+      res.json({
+        protocol: { version: '2024-11-05' },
+        transport: 'sse',
+        capabilities: { tools: {} },
+        server: { name: 'ghl-mcp-server', version: '1.0.0' }
+      });
+    });
+
     // Minimal HTTP MCP proxy for testing with curl
     // n8n MCP Client Tool HTTP endpoint (monotenant, no auth required)
     this.app.post('/mcp', async (req, res) => {
