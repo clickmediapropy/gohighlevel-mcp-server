@@ -17,7 +17,6 @@ import * as dotenv from 'dotenv';
 
 import { GHLApiClient } from './clients/ghl-api-client';
 import { CredentialManager } from './auth/credential-manager';
-import { addCredentialParametersToTools } from './utils/tool-helpers';
 import { ContactTools } from './tools/contact-tools';
 import { ConversationTools } from './tools/conversation-tools';
 import { BlogTools } from './tools/blog-tools';
@@ -261,11 +260,9 @@ class GHLMCPHttpServer {
         
         console.log(`[GHL MCP HTTP] Registered ${allTools.length} tools total`);
         
-        // Add credential parameters to all tools for multi-tenancy
-        const enhancedTools = addCredentialParametersToTools(allTools);
-        
+        // Monotenant: return tools as-is
         return {
-          tools: enhancedTools
+          tools: allTools
         };
       } catch (error) {
         console.error('[GHL MCP HTTP] Error listing tools:', error);
@@ -370,6 +367,41 @@ class GHLMCPHttpServer {
    * Setup HTTP routes
    */
   private setupRoutes(): void {
+    // Optional auth middleware (enabled when AUTH_TOKEN or MCP_AUTH_TOKEN is set)
+    const authToken = process.env.AUTH_TOKEN || process.env.MCP_AUTH_TOKEN;
+    const customHeaderName = (process.env.AUTH_HEADER_NAME || 'x-mcp-auth').toLowerCase();
+    const authenticate: express.RequestHandler = (req, res, next) => {
+      if (!authToken) {
+        return next();
+      }
+
+      const authorization = req.header('authorization');
+      const customHeader = req.header(customHeaderName);
+      const xApiKey = req.header('x-api-key');
+
+      // Accept either:
+      // - Authorization: Bearer <AUTH_TOKEN>
+      // - X-MCP-Auth: <AUTH_TOKEN> (or custom header via AUTH_HEADER_NAME)
+      // - X-API-Key: <AUTH_TOKEN>
+      let isAuthorized = false;
+      if (authorization && authorization.toLowerCase().startsWith('bearer ')) {
+        const provided = authorization.slice(7).trim();
+        isAuthorized = provided === authToken;
+      }
+      if (!isAuthorized && typeof customHeader === 'string') {
+        isAuthorized = customHeader.trim() === authToken;
+      }
+      if (!isAuthorized && typeof xApiKey === 'string') {
+        isAuthorized = xApiKey.trim() === authToken;
+      }
+
+      if (!isAuthorized) {
+        res.status(401).json({ error: 'Unauthorized' });
+        return;
+      }
+
+      next();
+    };
     // Health check endpoint
     this.app.get('/health', (req, res) => {
       res.json({ 
@@ -424,11 +456,9 @@ class GHLMCPHttpServer {
           ...storeTools, ...productsTools, ...paymentsTools, ...invoicesTools
         ];
 
-        const enhancedTools = addCredentialParametersToTools(allTools);
-
         res.json({
-          tools: enhancedTools,
-          count: enhancedTools.length
+          tools: allTools,
+          count: allTools.length
         });
       } catch (error) {
         res.status(500).json({ error: 'Failed to list tools' });
@@ -468,10 +498,12 @@ class GHLMCPHttpServer {
     };
 
     // Handle both GET and POST for SSE (MCP protocol requirements)
+    // Monotenant: no auth required
     this.app.get('/sse', handleSSE);
     this.app.post('/sse', handleSSE);
 
     // Minimal HTTP MCP proxy for testing with curl
+    // n8n MCP Client Tool HTTP endpoint (monotenant, no auth required)
     this.app.post('/mcp', async (req, res) => {
       try {
         const { method, params } = req.body || {};
@@ -508,8 +540,7 @@ class GHLMCPHttpServer {
             ...storeTools, ...productsTools, ...paymentsTools, ...invoicesTools
           ];
 
-          const enhancedTools = addCredentialParametersToTools(allTools);
-          res.json({ tools: enhancedTools });
+          res.json({ tools: allTools });
           return;
         }
 
@@ -520,9 +551,8 @@ class GHLMCPHttpServer {
             return;
           }
 
-          const credentials = this.credentialManager.extractCredentials(args);
-          const client = this.credentialManager.getClient(credentials);
-          const toolInstances = this.createToolInstances(client);
+          // Monotenant: always use default client
+          const toolInstances = this.createToolInstances(this.ghlClient);
           let result: any;
 
           if (this.isContactTool(name)) {
