@@ -943,6 +943,13 @@ class GHLMCPHttpServer {
     try {
       console.log('[GHL MCP HTTP] Testing GHL API connection...');
       
+      // Skip connection test in multi-tenant mode (when no default credentials)
+      if (!this.ghlClient) {
+        console.log('[GHL MCP HTTP] ⚠️ No default credentials configured - running in multi-tenant mode');
+        console.log('[GHL MCP HTTP] Credentials will be required per request');
+        return;
+      }
+      
       const result = await this.ghlClient.testConnection();
       
       console.log('[GHL MCP HTTP] ✅ GHL API connection successful');
