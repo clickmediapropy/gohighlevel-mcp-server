@@ -14,6 +14,8 @@ import {
 import * as dotenv from 'dotenv';
 
 import { GHLApiClient } from './clients/ghl-api-client';
+import { CredentialManager } from './auth/credential-manager';
+import { addCredentialParametersToTools } from './utils/tool-helpers';
 import { ContactTools } from './tools/contact-tools.js';
 import { ConversationTools } from './tools/conversation-tools.js';
 import { BlogTools } from './tools/blog-tools.js';
@@ -44,6 +46,7 @@ dotenv.config();
 class GHLMCPServer {
   private server: Server;
   private ghlClient: GHLApiClient;
+  private credentialManager: CredentialManager;
   private contactTools: ContactTools;
   private conversationTools: ConversationTools;
   private blogTools: BlogTools;
@@ -78,8 +81,18 @@ class GHLMCPServer {
       }
     );
 
-    // Initialize GHL API client
-    this.ghlClient = this.initializeGHLClient();
+    // Initialize credential manager
+    this.credentialManager = CredentialManager.getInstance();
+    
+    // Initialize default GHL API client (for backward compatibility)
+    try {
+      this.ghlClient = this.initializeGHLClient();
+    } catch (error) {
+      process.stderr.write(`[GHL MCP] No default credentials configured: ${error}\n`);
+      process.stderr.write('[GHL MCP] Server will require credentials per request\n');
+      // @ts-ignore - Allow null for multi-tenant mode
+      this.ghlClient = null;
+    }
     
     // Initialize tools
     this.contactTools = new ContactTools(this.ghlClient);
@@ -133,6 +146,33 @@ class GHLMCPServer {
     process.stderr.write(`[GHL MCP] Location ID: ${config.locationId}\n`);
 
     return new GHLApiClient(config);
+  }
+
+  /**
+   * Create tool instances with a specific GHL client
+   */
+  private createToolInstances(client: GHLApiClient) {
+    return {
+      contactTools: new ContactTools(client),
+      conversationTools: new ConversationTools(client),
+      blogTools: new BlogTools(client),
+      opportunityTools: new OpportunityTools(client),
+      calendarTools: new CalendarTools(client),
+      emailTools: new EmailTools(client),
+      locationTools: new LocationTools(client),
+      emailISVTools: new EmailISVTools(client),
+      socialMediaTools: new SocialMediaTools(client),
+      mediaTools: new MediaTools(client),
+      objectTools: new ObjectTools(client),
+      associationTools: new AssociationTools(client),
+      customFieldV2Tools: new CustomFieldV2Tools(client),
+      workflowTools: new WorkflowTools(client),
+      surveyTools: new SurveyTools(client),
+      storeTools: new StoreTools(client),
+      productsTools: new ProductsTools(client),
+      paymentsTools: new PaymentsTools(client),
+      invoicesTools: new InvoicesTools(client)
+    };
   }
 
   /**
@@ -207,8 +247,11 @@ class GHLMCPServer {
         process.stderr.write(`[GHL MCP] - ${paymentsToolDefinitions.length} payments tools\n`);
         process.stderr.write(`[GHL MCP] - ${invoicesToolDefinitions.length} invoices tools\n`);
         
+        // Add credential parameters to all tools for multi-tenancy
+        const enhancedTools = addCredentialParametersToTools(allTools);
+        
         return {
-          tools: allTools
+          tools: enhancedTools
         };
       } catch (error) {
         console.error('[GHL MCP] Error listing tools:', error);
@@ -227,47 +270,64 @@ class GHLMCPServer {
       process.stderr.write(`[GHL MCP] Arguments: ${JSON.stringify(args, null, 2)}\n`);
 
       try {
+        // Extract credentials from request if provided
+        const credentials = this.credentialManager.extractCredentials(args);
+        
+        // Get appropriate client based on credentials
+        let client: GHLApiClient;
+        try {
+          client = this.credentialManager.getClient(credentials);
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Authentication failed: ${error}`
+          );
+        }
+        
+        // Create tool instances with the appropriate client
+        const toolInstances = this.createToolInstances(client);
+        
         let result: any;
 
         // Route to appropriate tool handler
         if (this.isContactTool(name)) {
-          result = await this.contactTools.executeTool(name, args || {});
+          result = await toolInstances.contactTools.executeTool(name, args || {});
         } else if (this.isConversationTool(name)) {
-          result = await this.conversationTools.executeTool(name, args || {});
+          result = await toolInstances.conversationTools.executeTool(name, args || {});
         } else if (this.isBlogTool(name)) {
-          result = await this.blogTools.executeTool(name, args || {});
+          result = await toolInstances.blogTools.executeTool(name, args || {});
         } else if (this.isOpportunityTool(name)) {
-          result = await this.opportunityTools.executeTool(name, args || {});
+          result = await toolInstances.opportunityTools.executeTool(name, args || {});
         } else if (this.isCalendarTool(name)) {
-          result = await this.calendarTools.executeTool(name, args || {});
+          result = await toolInstances.calendarTools.executeTool(name, args || {});
         } else if (this.isEmailTool(name)) {
-          result = await this.emailTools.executeTool(name, args || {});
+          result = await toolInstances.emailTools.executeTool(name, args || {});
         } else if (this.isLocationTool(name)) {
-          result = await this.locationTools.executeTool(name, args || {});
+          result = await toolInstances.locationTools.executeTool(name, args || {});
         } else if (this.isEmailISVTool(name)) {
-          result = await this.emailISVTools.executeTool(name, args || {});
+          result = await toolInstances.emailISVTools.executeTool(name, args || {});
         } else if (this.isSocialMediaTool(name)) {
-          result = await this.socialMediaTools.executeTool(name, args || {});
+          result = await toolInstances.socialMediaTools.executeTool(name, args || {});
         } else if (this.isMediaTool(name)) {
-          result = await this.mediaTools.executeTool(name, args || {});
+          result = await toolInstances.mediaTools.executeTool(name, args || {});
         } else if (this.isObjectTool(name)) {
-          result = await this.objectTools.executeTool(name, args || {});
+          result = await toolInstances.objectTools.executeTool(name, args || {});
         } else if (this.isAssociationTool(name)) {
-          result = await this.associationTools.executeAssociationTool(name, args || {});
+          result = await toolInstances.associationTools.executeAssociationTool(name, args || {});
         } else if (this.isCustomFieldV2Tool(name)) {
-          result = await this.customFieldV2Tools.executeCustomFieldV2Tool(name, args || {});
+          result = await toolInstances.customFieldV2Tools.executeCustomFieldV2Tool(name, args || {});
         } else if (this.isWorkflowTool(name)) {
-          result = await this.workflowTools.executeWorkflowTool(name, args || {});
+          result = await toolInstances.workflowTools.executeWorkflowTool(name, args || {});
         } else if (this.isSurveyTool(name)) {
-          result = await this.surveyTools.executeSurveyTool(name, args || {});
+          result = await toolInstances.surveyTools.executeSurveyTool(name, args || {});
         } else if (this.isStoreTool(name)) {
-          result = await this.storeTools.executeStoreTool(name, args || {});
+          result = await toolInstances.storeTools.executeStoreTool(name, args || {});
         } else if (this.isProductsTool(name)) {
-          result = await this.productsTools.executeProductsTool(name, args || {});
+          result = await toolInstances.productsTools.executeProductsTool(name, args || {});
         } else if (this.isPaymentsTool(name)) {
-          result = await this.paymentsTools.handleToolCall(name, args || {});
+          result = await toolInstances.paymentsTools.handleToolCall(name, args || {});
         } else if (this.isInvoicesTool(name)) {
-          result = await this.invoicesTools.handleToolCall(name, args || {});
+          result = await toolInstances.invoicesTools.handleToolCall(name, args || {});
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }

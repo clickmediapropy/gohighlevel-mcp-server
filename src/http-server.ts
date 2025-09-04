@@ -16,6 +16,8 @@ import {
 import * as dotenv from 'dotenv';
 
 import { GHLApiClient } from './clients/ghl-api-client';
+import { CredentialManager } from './auth/credential-manager';
+import { addCredentialParametersToTools } from './utils/tool-helpers';
 import { ContactTools } from './tools/contact-tools';
 import { ConversationTools } from './tools/conversation-tools';
 import { BlogTools } from './tools/blog-tools';
@@ -32,7 +34,9 @@ import { CustomFieldV2Tools } from './tools/custom-field-v2-tools';
 import { WorkflowTools } from './tools/workflow-tools';
 import { SurveyTools } from './tools/survey-tools';
 import { StoreTools } from './tools/store-tools';
-import { ProductsTools } from './tools/products-tools.js';
+import { ProductsTools } from './tools/products-tools';
+import { PaymentsTools } from './tools/payments-tools';
+import { InvoicesTools } from './tools/invoices-tools';
 import { GHLConfig } from './types/ghl-types';
 
 // Load environment variables
@@ -45,6 +49,7 @@ class GHLMCPHttpServer {
   private app: express.Application;
   private server: Server;
   private ghlClient: GHLApiClient;
+  private credentialManager: CredentialManager;
   private contactTools: ContactTools;
   private conversationTools: ConversationTools;
   private blogTools: BlogTools;
@@ -62,6 +67,8 @@ class GHLMCPHttpServer {
   private surveyTools: SurveyTools;
   private storeTools: StoreTools;
   private productsTools: ProductsTools;
+  private paymentsTools: PaymentsTools;
+  private invoicesTools: InvoicesTools;
   private port: number;
 
   constructor() {
@@ -84,8 +91,18 @@ class GHLMCPHttpServer {
       }
     );
 
-    // Initialize GHL API client
-    this.ghlClient = this.initializeGHLClient();
+    // Initialize credential manager
+    this.credentialManager = CredentialManager.getInstance();
+    
+    // Initialize default GHL API client (for backward compatibility)
+    try {
+      this.ghlClient = this.initializeGHLClient();
+    } catch (error) {
+      process.stderr.write(`[GHL MCP] No default credentials configured: ${error}\n`);
+      process.stderr.write('[GHL MCP] Server will require credentials per request\n');
+      // @ts-ignore - Allow null for multi-tenant mode
+      this.ghlClient = null;
+    }
     
     // Initialize tools
     this.contactTools = new ContactTools(this.ghlClient);
@@ -105,6 +122,8 @@ class GHLMCPHttpServer {
     this.surveyTools = new SurveyTools(this.ghlClient);
     this.storeTools = new StoreTools(this.ghlClient);
     this.productsTools = new ProductsTools(this.ghlClient);
+    this.paymentsTools = new PaymentsTools(this.ghlClient);
+    this.invoicesTools = new InvoicesTools(this.ghlClient);
 
     // Setup MCP handlers
     this.setupMCPHandlers();
@@ -163,6 +182,33 @@ class GHLMCPHttpServer {
   }
 
   /**
+   * Create tool instances with a specific GHL client
+   */
+  private createToolInstances(client: GHLApiClient) {
+    return {
+      contactTools: new ContactTools(client),
+      conversationTools: new ConversationTools(client),
+      blogTools: new BlogTools(client),
+      opportunityTools: new OpportunityTools(client),
+      calendarTools: new CalendarTools(client),
+      emailTools: new EmailTools(client),
+      locationTools: new LocationTools(client),
+      emailISVTools: new EmailISVTools(client),
+      socialMediaTools: new SocialMediaTools(client),
+      mediaTools: new MediaTools(client),
+      objectTools: new ObjectTools(client),
+      associationTools: new AssociationTools(client),
+      customFieldV2Tools: new CustomFieldV2Tools(client),
+      workflowTools: new WorkflowTools(client),
+      surveyTools: new SurveyTools(client),
+      storeTools: new StoreTools(client),
+      productsTools: new ProductsTools(client),
+      paymentsTools: new PaymentsTools(client),
+      invoicesTools: new InvoicesTools(client)
+    };
+  }
+
+  /**
    * Setup MCP request handlers
    */
   private setupMCPHandlers(): void {
@@ -188,6 +234,8 @@ class GHLMCPHttpServer {
         const surveyToolDefinitions = this.surveyTools.getTools();
         const storeToolDefinitions = this.storeTools.getTools();
         const productsToolDefinitions = this.productsTools.getTools();
+        const paymentsToolDefinitions = this.paymentsTools.getTools();
+        const invoicesToolDefinitions = this.invoicesTools.getTools();
         
         const allTools = [
           ...contactToolDefinitions,
@@ -206,13 +254,18 @@ class GHLMCPHttpServer {
           ...workflowToolDefinitions,
           ...surveyToolDefinitions,
           ...storeToolDefinitions,
-          ...productsToolDefinitions
+          ...productsToolDefinitions,
+          ...paymentsToolDefinitions,
+          ...invoicesToolDefinitions
         ];
         
         console.log(`[GHL MCP HTTP] Registered ${allTools.length} tools total`);
         
+        // Add credential parameters to all tools for multi-tenancy
+        const enhancedTools = addCredentialParametersToTools(allTools);
+        
         return {
-          tools: allTools
+          tools: enhancedTools
         };
       } catch (error) {
         console.error('[GHL MCP HTTP] Error listing tools:', error);
@@ -230,43 +283,64 @@ class GHLMCPHttpServer {
       console.log(`[GHL MCP HTTP] Executing tool: ${name}`);
 
       try {
+        // Extract credentials from request if provided
+        const credentials = this.credentialManager.extractCredentials(args);
+        
+        // Get appropriate client based on credentials
+        let client: GHLApiClient;
+        try {
+          client = this.credentialManager.getClient(credentials);
+        } catch (error) {
+          throw new McpError(
+            ErrorCode.InvalidRequest,
+            `Authentication failed: ${error}`
+          );
+        }
+        
+        // Create tool instances with the appropriate client
+        const toolInstances = this.createToolInstances(client);
+        
         let result: any;
 
         // Route to appropriate tool handler
         if (this.isContactTool(name)) {
-          result = await this.contactTools.executeTool(name, args || {});
+          result = await toolInstances.contactTools.executeTool(name, args || {});
         } else if (this.isConversationTool(name)) {
-          result = await this.conversationTools.executeTool(name, args || {});
+          result = await toolInstances.conversationTools.executeTool(name, args || {});
         } else if (this.isBlogTool(name)) {
-          result = await this.blogTools.executeTool(name, args || {});
+          result = await toolInstances.blogTools.executeTool(name, args || {});
         } else if (this.isOpportunityTool(name)) {
-          result = await this.opportunityTools.executeTool(name, args || {});
+          result = await toolInstances.opportunityTools.executeTool(name, args || {});
         } else if (this.isCalendarTool(name)) {
-          result = await this.calendarTools.executeTool(name, args || {});
+          result = await toolInstances.calendarTools.executeTool(name, args || {});
         } else if (this.isEmailTool(name)) {
-          result = await this.emailTools.executeTool(name, args || {});
+          result = await toolInstances.emailTools.executeTool(name, args || {});
         } else if (this.isLocationTool(name)) {
-          result = await this.locationTools.executeTool(name, args || {});
+          result = await toolInstances.locationTools.executeTool(name, args || {});
         } else if (this.isEmailISVTool(name)) {
-          result = await this.emailISVTools.executeTool(name, args || {});
+          result = await toolInstances.emailISVTools.executeTool(name, args || {});
         } else if (this.isSocialMediaTool(name)) {
-          result = await this.socialMediaTools.executeTool(name, args || {});
+          result = await toolInstances.socialMediaTools.executeTool(name, args || {});
         } else if (this.isMediaTool(name)) {
-          result = await this.mediaTools.executeTool(name, args || {});
+          result = await toolInstances.mediaTools.executeTool(name, args || {});
         } else if (this.isObjectTool(name)) {
-          result = await this.objectTools.executeTool(name, args || {});
+          result = await toolInstances.objectTools.executeTool(name, args || {});
         } else if (this.isAssociationTool(name)) {
-          result = await this.associationTools.executeAssociationTool(name, args || {});
+          result = await toolInstances.associationTools.executeAssociationTool(name, args || {});
         } else if (this.isCustomFieldV2Tool(name)) {
-          result = await this.customFieldV2Tools.executeCustomFieldV2Tool(name, args || {});
+          result = await toolInstances.customFieldV2Tools.executeCustomFieldV2Tool(name, args || {});
         } else if (this.isWorkflowTool(name)) {
-          result = await this.workflowTools.executeWorkflowTool(name, args || {});
+          result = await toolInstances.workflowTools.executeWorkflowTool(name, args || {});
         } else if (this.isSurveyTool(name)) {
-          result = await this.surveyTools.executeSurveyTool(name, args || {});
+          result = await toolInstances.surveyTools.executeSurveyTool(name, args || {});
         } else if (this.isStoreTool(name)) {
-          result = await this.storeTools.executeStoreTool(name, args || {});
+          result = await toolInstances.storeTools.executeStoreTool(name, args || {});
         } else if (this.isProductsTool(name)) {
-          result = await this.productsTools.executeProductsTool(name, args || {});
+          result = await toolInstances.productsTools.executeProductsTool(name, args || {});
+        } else if (this.isPaymentsTool(name)) {
+          result = await toolInstances.paymentsTools.handleToolCall(name, args || {});
+        } else if (this.isInvoicesTool(name)) {
+          result = await toolInstances.invoicesTools.handleToolCall(name, args || {});
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
@@ -340,10 +414,21 @@ class GHLMCPHttpServer {
         const surveyTools = this.surveyTools.getTools();
         const storeTools = this.storeTools.getTools();
         const productsTools = this.productsTools.getTools();
-        
+        const paymentsTools = this.paymentsTools.getTools();
+        const invoicesTools = this.invoicesTools.getTools();
+
+        const allTools = [
+          ...contactTools, ...conversationTools, ...blogTools, ...opportunityTools, ...calendarTools,
+          ...emailTools, ...locationTools, ...emailISVTools, ...socialMediaTools, ...mediaTools,
+          ...objectTools, ...associationTools, ...customFieldV2Tools, ...workflowTools, ...surveyTools,
+          ...storeTools, ...productsTools, ...paymentsTools, ...invoicesTools
+        ];
+
+        const enhancedTools = addCredentialParametersToTools(allTools);
+
         res.json({
-          tools: [...contactTools, ...conversationTools, ...blogTools, ...opportunityTools, ...calendarTools, ...emailTools, ...locationTools, ...emailISVTools, ...socialMediaTools, ...mediaTools, ...objectTools, ...associationTools, ...customFieldV2Tools, ...workflowTools, ...surveyTools, ...storeTools, ...productsTools],
-          count: contactTools.length + conversationTools.length + blogTools.length + opportunityTools.length + calendarTools.length + emailTools.length + locationTools.length + emailISVTools.length + socialMediaTools.length + mediaTools.length + objectTools.length + associationTools.length + customFieldV2Tools.length + workflowTools.length + surveyTools.length + storeTools.length + productsTools.length
+          tools: enhancedTools,
+          count: enhancedTools.length
         });
       } catch (error) {
         res.status(500).json({ error: 'Failed to list tools' });
@@ -385,6 +470,115 @@ class GHLMCPHttpServer {
     // Handle both GET and POST for SSE (MCP protocol requirements)
     this.app.get('/sse', handleSSE);
     this.app.post('/sse', handleSSE);
+
+    // Minimal HTTP MCP proxy for testing with curl
+    this.app.post('/mcp', async (req, res) => {
+      try {
+        const { method, params } = req.body || {};
+        if (!method) {
+          res.status(400).json({ error: 'Missing method' });
+          return;
+        }
+
+        if (method === 'tools/list') {
+          const contactTools = this.contactTools.getToolDefinitions();
+          const conversationTools = this.conversationTools.getToolDefinitions();
+          const blogTools = this.blogTools.getToolDefinitions();
+          const opportunityTools = this.opportunityTools.getToolDefinitions();
+          const calendarTools = this.calendarTools.getToolDefinitions();
+          const emailTools = this.emailTools.getToolDefinitions();
+          const locationTools = this.locationTools.getToolDefinitions();
+          const emailISVTools = this.emailISVTools.getToolDefinitions();
+          const socialMediaTools = this.socialMediaTools.getTools();
+          const mediaTools = this.mediaTools.getToolDefinitions();
+          const objectTools = this.objectTools.getToolDefinitions();
+          const associationTools = this.associationTools.getTools();
+          const customFieldV2Tools = this.customFieldV2Tools.getTools();
+          const workflowTools = this.workflowTools.getTools();
+          const surveyTools = this.surveyTools.getTools();
+          const storeTools = this.storeTools.getTools();
+          const productsTools = this.productsTools.getTools();
+          const paymentsTools = this.paymentsTools.getTools();
+          const invoicesTools = this.invoicesTools.getTools();
+
+          const allTools = [
+            ...contactTools, ...conversationTools, ...blogTools, ...opportunityTools, ...calendarTools,
+            ...emailTools, ...locationTools, ...emailISVTools, ...socialMediaTools, ...mediaTools,
+            ...objectTools, ...associationTools, ...customFieldV2Tools, ...workflowTools, ...surveyTools,
+            ...storeTools, ...productsTools, ...paymentsTools, ...invoicesTools
+          ];
+
+          const enhancedTools = addCredentialParametersToTools(allTools);
+          res.json({ tools: enhancedTools });
+          return;
+        }
+
+        if (method === 'tools/call') {
+          const { name, arguments: args } = params || {};
+          if (!name) {
+            res.status(400).json({ error: 'Missing tool name' });
+            return;
+          }
+
+          const credentials = this.credentialManager.extractCredentials(args);
+          const client = this.credentialManager.getClient(credentials);
+          const toolInstances = this.createToolInstances(client);
+          let result: any;
+
+          if (this.isContactTool(name)) {
+            result = await toolInstances.contactTools.executeTool(name, args || {});
+          } else if (this.isConversationTool(name)) {
+            result = await toolInstances.conversationTools.executeTool(name, args || {});
+          } else if (this.isBlogTool(name)) {
+            result = await toolInstances.blogTools.executeTool(name, args || {});
+          } else if (this.isOpportunityTool(name)) {
+            result = await toolInstances.opportunityTools.executeTool(name, args || {});
+          } else if (this.isCalendarTool(name)) {
+            result = await toolInstances.calendarTools.executeTool(name, args || {});
+          } else if (this.isEmailTool(name)) {
+            result = await toolInstances.emailTools.executeTool(name, args || {});
+          } else if (this.isLocationTool(name)) {
+            result = await toolInstances.locationTools.executeTool(name, args || {});
+          } else if (this.isEmailISVTool(name)) {
+            result = await toolInstances.emailISVTools.executeTool(name, args || {});
+          } else if (this.isSocialMediaTool(name)) {
+            result = await toolInstances.socialMediaTools.executeTool(name, args || {});
+          } else if (this.isMediaTool(name)) {
+            result = await toolInstances.mediaTools.executeTool(name, args || {});
+          } else if (this.isObjectTool(name)) {
+            result = await toolInstances.objectTools.executeTool(name, args || {});
+          } else if (this.isAssociationTool(name)) {
+            result = await toolInstances.associationTools.executeAssociationTool(name, args || {});
+          } else if (this.isCustomFieldV2Tool(name)) {
+            result = await toolInstances.customFieldV2Tools.executeCustomFieldV2Tool(name, args || {});
+          } else if (this.isWorkflowTool(name)) {
+            result = await toolInstances.workflowTools.executeWorkflowTool(name, args || {});
+          } else if (this.isSurveyTool(name)) {
+            result = await toolInstances.surveyTools.executeSurveyTool(name, args || {});
+          } else if (this.isStoreTool(name)) {
+            result = await toolInstances.storeTools.executeStoreTool(name, args || {});
+          } else if (this.isProductsTool(name)) {
+            result = await toolInstances.productsTools.executeProductsTool(name, args || {});
+          } else if (this.isPaymentsTool(name)) {
+            result = await toolInstances.paymentsTools.handleToolCall(name, args || {});
+          } else if (this.isInvoicesTool(name)) {
+            result = await toolInstances.invoicesTools.handleToolCall(name, args || {});
+          } else {
+            res.status(400).json({ error: `Unknown tool: ${name}` });
+            return;
+          }
+
+          res.json({ content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] });
+          return;
+        }
+
+        res.status(400).json({ error: `Unsupported method: ${method}` });
+        return;
+      } catch (err: any) {
+        res.status(500).json({ error: `MCP proxy error: ${err?.message || err}` });
+        return;
+      }
+    });
 
     // Root endpoint with server info
     this.app.get('/', (req, res) => {
@@ -660,6 +854,29 @@ class GHLMCPHttpServer {
       'ghl_bulk_update_product_reviews'
     ];
     return productsToolNames.includes(toolName);
+  }
+
+  private isPaymentsTool(toolName: string): boolean {
+    const paymentsToolNames = [
+      'create_whitelabel_integration_provider', 'list_whitelabel_integration_providers',
+      'list_orders', 'get_order_by_id', 'create_order_fulfillment', 'list_order_fulfillments',
+      'list_transactions', 'get_transaction_by_id', 'list_subscriptions', 'get_subscription_by_id',
+      'list_coupons', 'create_coupon', 'update_coupon', 'delete_coupon', 'get_coupon',
+      'create_custom_provider_integration', 'delete_custom_provider_integration',
+      'get_custom_provider_config', 'create_custom_provider_config', 'disconnect_custom_provider_config'
+    ];
+    return paymentsToolNames.includes(toolName);
+  }
+
+  private isInvoicesTool(toolName: string): boolean {
+    const invoicesToolNames = [
+      'create_invoice_template', 'list_invoice_templates', 'get_invoice_template',
+      'update_invoice_template', 'delete_invoice_template', 'create_invoice_schedule',
+      'list_invoice_schedules', 'get_invoice_schedule', 'create_invoice', 'list_invoices',
+      'get_invoice', 'send_invoice', 'create_estimate', 'list_estimates', 'send_estimate',
+      'create_invoice_from_estimate', 'generate_invoice_number', 'generate_estimate_number'
+    ];
+    return invoicesToolNames.includes(toolName);
   }
 
   /**

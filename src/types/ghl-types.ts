@@ -11,6 +11,12 @@ export interface GHLConfig {
   locationId: string;
 }
 
+// Multi-tenant Credentials Interface
+export interface GHLRequestCredentials {
+  ghlApiKey?: string;
+  ghlLocationId?: string;
+}
+
 // OAuth Token Response
 export interface GHLTokenResponse {
   access_token: string;
