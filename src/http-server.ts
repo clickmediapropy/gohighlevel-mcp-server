@@ -519,13 +519,23 @@ class GHLMCPHttpServer {
       });
     });
 
-    // Minimal HTTP MCP proxy for testing with curl
-    // n8n MCP Client Tool HTTP endpoint (monotenant, no auth required)
+    // Minimal HTTP MCP proxy for testing with curl and n8n HTTP client
+    // Supports basic MCP methods used by clients: initialize, tools/list, tools/call
     this.app.post('/mcp', async (req, res) => {
       try {
         const { method, params } = req.body || {};
         if (!method) {
           res.status(400).json({ error: 'Missing method' });
+          return;
+        }
+
+        // Handshake used by HTTP Streamable clients
+        if (method === 'initialize') {
+          res.json({
+            protocol: { version: '2024-11-05' },
+            capabilities: { tools: {} },
+            server: { name: 'ghl-mcp-server', version: '1.0.0' }
+          });
           return;
         }
 
